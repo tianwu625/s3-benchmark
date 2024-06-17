@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"code.cloudfoundry.org/bytefmt"
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/sha1"
@@ -16,7 +17,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/pivotal-golang/bytefmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -114,18 +114,15 @@ func deleteAllObjects() {
 	// Use multiple routines to do the actual delete
 	var doneDeletes sync.WaitGroup
 	// Loop deleting our versions reading as big a list as we can
-	var keyMarker, versionId *string
 	var err error
+	var keyMarker *string
 	for loop := 1; ; loop++ {
 		// Delete all the existing objects and versions in the bucket
-		in := &s3.ListObjectVersionsInput{Bucket: aws.String(bucket), KeyMarker: keyMarker, VersionIdMarker: versionId, MaxKeys: aws.Int64(1000)}
-		if listVersions, listErr := client.ListObjectVersions(in); listErr == nil {
+		in := &s3.ListObjectsV2Input{Bucket: aws.String(bucket), ContinuationToken: keyMarker, MaxKeys: aws.Int64(1000)}
+		if listRes, listErr := client.ListObjectsV2(in); listErr == nil {
 			delete := &s3.Delete{Quiet: aws.Bool(true)}
-			for _, version := range listVersions.Versions {
-				delete.Objects = append(delete.Objects, &s3.ObjectIdentifier{Key: version.Key, VersionId: version.VersionId})
-			}
-			for _, marker := range listVersions.DeleteMarkers {
-				delete.Objects = append(delete.Objects, &s3.ObjectIdentifier{Key: marker.Key, VersionId: marker.VersionId})
+			for _, obj := range listRes.Contents {
+				delete.Objects = append(delete.Objects, &s3.ObjectIdentifier{Key: obj.Key})
 			}
 			if len(delete.Objects) > 0 {
 				// Start a delete routine
@@ -139,11 +136,10 @@ func deleteAllObjects() {
 				go doDelete(bucket, delete)
 			}
 			// Advance to next versions
-			if listVersions.IsTruncated == nil || !*listVersions.IsTruncated {
+			if listRes.IsTruncated == nil || !*listRes.IsTruncated {
 				break
 			}
-			keyMarker = listVersions.NextKeyMarker
-			versionId = listVersions.NextVersionIdMarker
+			keyMarker = listRes.NextContinuationToken
 		} else {
 			// The bucket may not exist, just ignore in that case
 			if strings.HasPrefix(listErr.Error(), "NoSuchBucket") {
@@ -217,7 +213,7 @@ func runUpload(thread_num int) {
 		if resp, err := httpClient.Do(req); err != nil {
 			log.Fatalf("FATAL: Error uploading object %s: %v", prefix, err)
 		} else if resp != nil && resp.StatusCode != http.StatusOK {
-			if (resp.StatusCode == http.StatusServiceUnavailable) {
+			if resp.StatusCode == http.StatusServiceUnavailable {
 				atomic.AddInt32(&upload_slowdown_count, 1)
 				atomic.AddInt32(&upload_count, -1)
 			} else {
@@ -245,7 +241,7 @@ func runDownload(thread_num int) {
 		if resp, err := httpClient.Do(req); err != nil {
 			log.Fatalf("FATAL: Error downloading object %s: %v", prefix, err)
 		} else if resp != nil && resp.Body != nil {
-			if (resp.StatusCode == http.StatusServiceUnavailable){
+			if resp.StatusCode == http.StatusServiceUnavailable {
 				atomic.AddInt32(&download_slowdown_count, 1)
 				atomic.AddInt32(&download_count, -1)
 			} else {
@@ -270,7 +266,7 @@ func runDelete(thread_num int) {
 		setSignature(req)
 		if resp, err := httpClient.Do(req); err != nil {
 			log.Fatalf("FATAL: Error deleting object %s: %v", prefix, err)
-		} else if (resp != nil && resp.StatusCode == http.StatusServiceUnavailable) {
+		} else if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
 			atomic.AddInt32(&delete_slowdown_count, 1)
 			atomic.AddInt32(&delete_count, -1)
 		}
